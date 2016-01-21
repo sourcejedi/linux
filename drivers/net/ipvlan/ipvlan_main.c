@@ -14,7 +14,7 @@ void ipvlan_adjust_mtu(struct ipvl_dev *ipvlan, struct net_device *dev)
 	ipvlan->dev->mtu = dev->mtu - ipvlan->mtu_adj;
 }
 
-void ipvlan_set_port_mode(struct ipvl_port *port, u32 nval)
+void ipvlan_set_port_mode(struct ipvl_port *port, u16 nval)
 {
 	struct ipvl_dev *ipvlan;
 
@@ -392,6 +392,12 @@ static int ipvlan_nl_changelink(struct net_device *dev,
 	if (data && data[IFLA_IPVLAN_MODE]) {
 		u16 nmode = nla_get_u16(data[IFLA_IPVLAN_MODE]);
 
+		/*
+		 * This changes all the other slaves too.
+		 * It's not clear why we let you do that
+		 * (or why we don't simply support mixing modes).
+		 * Fortunately it wasn't implemented in "ip link set".
+		 */
 		ipvlan_set_port_mode(port, nmode);
 	}
 	return 0;
@@ -461,8 +467,19 @@ static int ipvlan_link_new(struct net *src_net, struct net_device *dev,
 	}
 
 	port = ipvlan_port_get_rtnl(phy_dev);
-	if (data && data[IFLA_IPVLAN_MODE])
-		port->mode = nla_get_u16(data[IFLA_IPVLAN_MODE]);
+	port->count += 1;
+
+	if (data && data[IFLA_IPVLAN_MODE]) {
+		u16 mode = nla_get_u16(data[IFLA_IPVLAN_MODE]);
+
+		if (mode != port->mode && port->count > 1) {
+			err = -EBUSY;
+			netdev_err(phy_dev,
+			           "Master ipvlan port is in different mode");
+			goto ipvlan_destroy_port;
+		}
+		port->mode = mode;
+	}
 
 	ipvlan->phy_dev = phy_dev;
 	ipvlan->dev = dev;
@@ -478,7 +495,6 @@ static int ipvlan_link_new(struct net *src_net, struct net_device *dev,
 
 	dev->priv_flags |= IFF_IPVLAN_SLAVE;
 
-	port->count += 1;
 	err = register_netdevice(dev);
 	if (err < 0)
 		goto ipvlan_destroy_port;
