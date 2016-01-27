@@ -381,6 +381,7 @@ int ip6_forward(struct sk_buff *skb)
 	struct ipv6hdr *hdr = ipv6_hdr(skb);
 	struct inet6_skb_parm *opt = IP6CB(skb);
 	struct net *net = dev_net(dst->dev);
+	int addrtype;
 	u32 mtu;
 
 	if (net->ipv6.devconf_all->forwarding == 0)
@@ -484,18 +485,17 @@ int ip6_forward(struct sk_buff *skb)
 			ndisc_send_redirect(skb, target);
 		if (peer)
 			inet_putpeer(peer);
-	} else {
-		int addrtype = ipv6_addr_type(&hdr->saddr);
+	}
 
-		/* This check is security critical. */
-		if (addrtype == IPV6_ADDR_ANY ||
-		    addrtype & (IPV6_ADDR_MULTICAST | IPV6_ADDR_LOOPBACK))
-			goto error;
-		if (addrtype & IPV6_ADDR_LINKLOCAL) {
-			icmpv6_send(skb, ICMPV6_DEST_UNREACH,
-				    ICMPV6_NOT_NEIGHBOUR, 0);
-			goto error;
-		}
+	/* This check is security critical. */
+	addrtype = ipv6_addr_type(&hdr->saddr);
+	if (addrtype == IPV6_ADDR_ANY ||
+	    addrtype & (IPV6_ADDR_MULTICAST | IPV6_ADDR_LOOPBACK))
+		goto error;
+	if (addrtype & IPV6_ADDR_LINKLOCAL) {
+		icmpv6_send(skb, ICMPV6_DEST_UNREACH,
+			    ICMPV6_NOT_NEIGHBOUR, 0);
+		goto error;
 	}
 
 	mtu = ip6_dst_mtu_forward(dst);
