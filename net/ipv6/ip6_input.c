@@ -122,6 +122,29 @@ int ipv6_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt
 	    ipv6_addr_loopback(&hdr->daddr))
 		goto err;
 
+	/*
+	 * RFC4291 2.5.3
+	 * The loopback address must not be used as the source address in IPv6
+	 * packets that are sent outside of a single node.  An IPv6 packet
+	 * with a destination address of loopback must never be sent outside
+	 * of a single node.
+	 *
+	 * http://www.secfu.net/2015/01/27/should-ipv6-packets-with-source-address-1-be-processed-when-received-on-an-external-interface/
+	 * As we can observe:
+	 * a) Chiron sends a TCP SYN to ::1 directly to target's MAC address.
+	 * b) The [Linux] target sends a SYN-ACK to ::1.
+	 *
+	 * Checking source address prevents the non-conformant behaviour (b).
+	 * It matches all other OS and IPv4.  Programmers assume they can rely
+	 * on this for security, even though IPv6 does not guarantee it.
+	 *
+	 * See also CVE-2014-9751, ICSA-14-353-01, and
+	 * http://bugs.ntp.org/show_bug.cgi?id=2672#c7
+	 */
+	if (!(dev->flags & IFF_LOOPBACK) &&
+	    ipv6_addr_loopback(&hdr->saddr))
+		goto err;
+
 	/* RFC4291 Errata ID: 3480
 	 * Interface-Local scope spans only a single interface on a
 	 * node and is useful only for loopback transmission of
