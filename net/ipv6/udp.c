@@ -1275,9 +1275,6 @@ do_udp_sendmsg:
 	if (!fl6.flowi6_oif)
 		fl6.flowi6_oif = sk->sk_bound_dev_if;
 
-	if (!fl6.flowi6_oif)
-		fl6.flowi6_oif = np->sticky_pktinfo.ipi6_ifindex;
-
 	fl6.flowi6_mark = sk->sk_mark;
 
 	if (msg->msg_controllen) {
@@ -1326,6 +1323,9 @@ do_udp_sendmsg:
 		connected = 0;
 	} else if (!fl6.flowi6_oif)
 		fl6.flowi6_oif = np->ucast_oif;
+
+	if (!fl6.flowi6_oif)
+		fl6.flowi6_oif = np->sticky_pktinfo.ipi6_ifindex;
 
 	security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
 
