@@ -949,6 +949,12 @@ static int ip6_dst_lookup_tail(struct net *net, const struct sock *sk,
 	if (err)
 		goto out_err_release;
 
+	if (ipv6_addr_loopback(&fl6->saddr) &&
+	    !((*dst)->dev->flags & IFF_LOOPBACK)) {
+		err = -EINVAL;
+		goto out_err_release;
+	}
+
 #ifdef CONFIG_IPV6_OPTIMISTIC_DAD
 	/*
 	 * Here if the dst entry we've looked up
