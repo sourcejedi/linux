@@ -1149,7 +1149,7 @@ int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	struct ipv6_txoptions *opt_to_free = NULL;
 	struct ip6_flowlabel *flowlabel = NULL;
 	struct flowi6 fl6;
-	struct dst_entry *dst;
+	struct dst_entry *dst = NULL;
 	int addr_len = msg->msg_namelen;
 	int ulen = len;
 	int hlimit = -1;
@@ -1326,6 +1326,19 @@ do_udp_sendmsg:
 
 	if (!fl6.flowi6_oif)
 		fl6.flowi6_oif = np->sticky_pktinfo.ipi6_ifindex;
+
+	/*
+	 * Link-local addresses require an interface.  bind() and IPV6_PKTINFO
+	 * took responsibility to check their source address.  We had to wait
+	 * until now to check our destination address, in case the interface
+	 * was in IPV6_PKTINFO ancillary data.  This was necessary
+	 * because RFC2133 didn't have sin6->sin6_scope_id.
+	 */
+	if (!fl6.flowi6_oif &&
+	    __ipv6_addr_needs_scope_id(__ipv6_addr_type(&fl6.daddr)))) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	security_sk_classify_flow(sk, flowi6_to_flowi(&fl6));
 
