@@ -28,11 +28,6 @@
 #define BO_LOCKED   0x4000
 #define BO_PINNED   0x2000
 
-static inline void __user *to_user_ptr(u64 address)
-{
-	return (void __user *)(uintptr_t)address;
-}
-
 static struct msm_gem_submit *submit_create(struct drm_device *dev,
 		struct msm_gpu *gpu, int nr)
 {
@@ -68,7 +63,7 @@ static int submit_lookup_objects(struct msm_gem_submit *submit,
 		struct drm_gem_object *obj;
 		struct msm_gem_object *msm_obj;
 		void __user *userptr =
-			to_user_ptr(args->bos + (i * sizeof(submit_bo)));
+			u64_to_user_ptr(args->bos + (i * sizeof(submit_bo)));
 
 		ret = copy_from_user(&submit_bo, userptr, sizeof(submit_bo));
 		if (ret) {
@@ -257,7 +252,7 @@ static int submit_reloc(struct msm_gem_submit *submit, struct msm_gem_object *ob
 	for (i = 0; i < nr_relocs; i++) {
 		struct drm_msm_gem_submit_reloc submit_reloc;
 		void __user *userptr =
-			to_user_ptr(relocs + (i * sizeof(submit_reloc)));
+			u64_to_user_ptr(relocs + (i * sizeof(submit_reloc)));
 		uint32_t iova, off;
 		bool valid;
 
@@ -323,9 +318,12 @@ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
 	struct drm_msm_gem_submit *args = data;
 	struct msm_file_private *ctx = file->driver_priv;
 	struct msm_gem_submit *submit;
-	struct msm_gpu *gpu;
+	struct msm_gpu *gpu = priv->gpu;
 	unsigned i;
 	int ret;
+
+	if (!gpu)
+		return -ENXIO;
 
 	/* for now, we just have 3d pipe.. eventually this would need to
 	 * be more clever to dispatch to appropriate gpu module:
@@ -333,18 +331,14 @@ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
 	if (args->pipe != MSM_PIPE_3D0)
 		return -EINVAL;
 
-	gpu = priv->gpu;
-
 	if (args->nr_cmds > MAX_CMDS)
 		return -EINVAL;
 
-	mutex_lock(&dev->struct_mutex);
-
 	submit = submit_create(dev, gpu, args->nr_bos);
-	if (!submit) {
-		ret = -ENOMEM;
-		goto out;
-	}
+	if (!submit)
+		return -ENOMEM;
+
+	mutex_lock(&dev->struct_mutex);
 
 	ret = submit_lookup_objects(submit, args, file);
 	if (ret)
@@ -357,7 +351,7 @@ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
 	for (i = 0; i < args->nr_cmds; i++) {
 		struct drm_msm_gem_submit_cmd submit_cmd;
 		void __user *userptr =
-			to_user_ptr(args->cmds + (i * sizeof(submit_cmd)));
+			u64_to_user_ptr(args->cmds + (i * sizeof(submit_cmd)));
 		struct msm_gem_object *msm_obj;
 		uint32_t iova;
 
@@ -419,8 +413,7 @@ int msm_ioctl_gem_submit(struct drm_device *dev, void *data,
 	args->fence = submit->fence;
 
 out:
-	if (submit)
-		submit_cleanup(submit, !!ret);
+	submit_cleanup(submit, !!ret);
 	mutex_unlock(&dev->struct_mutex);
 	return ret;
 }

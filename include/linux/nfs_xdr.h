@@ -275,6 +275,7 @@ struct nfs4_layoutcommit_args {
 	size_t layoutupdate_len;
 	struct page *layoutupdate_page;
 	struct page **layoutupdate_pages;
+	__be32 *start_p;
 };
 
 struct nfs4_layoutcommit_res {
@@ -1467,10 +1468,10 @@ struct nfs_pgio_completion_ops {
 };
 
 struct nfs_unlinkdata {
-	struct hlist_node list;
 	struct nfs_removeargs args;
 	struct nfs_removeres res;
-	struct inode *dir;
+	struct dentry *dentry;
+	wait_queue_head_t wq;
 	struct rpc_cred	*cred;
 	struct nfs_fattr dir_attr;
 	long timeout;

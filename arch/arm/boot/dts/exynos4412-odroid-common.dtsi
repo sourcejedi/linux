@@ -35,7 +35,7 @@
 			linux,code = <KEY_POWER>;
 			label = "power key";
 			debounce-interval = <10>;
-			gpio-key,wakeup;
+			wakeup-source;
 		};
 	};
 
@@ -185,6 +185,10 @@
 	vdd_osc-supply = <&ldo10_reg>;
 	vdd_pll-supply = <&ldo8_reg>;
 	ddc = <&i2c_2>;
+	status = "okay";
+};
+
+&hdmicec {
 	status = "okay";
 };
 

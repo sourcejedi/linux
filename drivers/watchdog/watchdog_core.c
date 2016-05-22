@@ -164,7 +164,7 @@ static int watchdog_restart_notifier(struct notifier_block *nb,
 
 	int ret;
 
-	ret = wdd->ops->restart(wdd);
+	ret = wdd->ops->restart(wdd, action, data);
 	if (ret)
 		return NOTIFY_BAD;
 
@@ -199,7 +199,7 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 		return -EINVAL;
 
 	/* Mandatory operations need to be supported */
-	if (wdd->ops->start == NULL || wdd->ops->stop == NULL)
+	if (!wdd->ops->start || (!wdd->ops->stop && !wdd->max_hw_heartbeat_ms))
 		return -EINVAL;
 
 	watchdog_check_min_max_timeout(wdd);
@@ -262,7 +262,7 @@ static int __watchdog_register_device(struct watchdog_device *wdd)
 
 		ret = register_restart_handler(&wdd->restart_nb);
 		if (ret)
-			pr_warn("watchog%d: Cannot register restart handler (%d)\n",
+			pr_warn("watchdog%d: Cannot register restart handler (%d)\n",
 				wdd->id, ret);
 	}
 

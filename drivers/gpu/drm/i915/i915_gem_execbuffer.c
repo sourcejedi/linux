@@ -193,13 +193,10 @@ static struct i915_vma *eb_get_vma(struct eb_vmas *eb, unsigned long handle)
 		return eb->lut[handle];
 	} else {
 		struct hlist_head *head;
-		struct hlist_node *node;
+		struct i915_vma *vma;
 
 		head = &eb->buckets[handle & eb->and];
-		hlist_for_each(node, head) {
-			struct i915_vma *vma;
-
-			vma = hlist_entry(node, struct i915_vma, exec_node);
+		hlist_for_each_entry(vma, head, exec_node) {
 			if (vma->exec_handle == handle)
 				return vma;
 		}
@@ -491,7 +488,7 @@ i915_gem_execbuffer_relocate_entry(struct drm_i915_gem_object *obj,
 		ret = relocate_entry_cpu(obj, reloc, target_offset);
 	else if (obj->map_and_fenceable)
 		ret = relocate_entry_gtt(obj, reloc, target_offset);
-	else if (cpu_has_clflush)
+	else if (static_cpu_has(X86_FEATURE_CLFLUSH))
 		ret = relocate_entry_clflush(obj, reloc, target_offset);
 	else {
 		WARN_ONCE(1, "Impossible case in relocation handling\n");
@@ -517,7 +514,7 @@ i915_gem_execbuffer_relocate_vma(struct i915_vma *vma,
 	struct drm_i915_gem_exec_object2 *entry = vma->exec_entry;
 	int remain, ret;
 
-	user_relocs = to_user_ptr(entry->relocs_ptr);
+	user_relocs = u64_to_user_ptr(entry->relocs_ptr);
 
 	remain = entry->relocation_count;
 	while (remain) {
@@ -671,7 +668,7 @@ need_reloc_mappable(struct i915_vma *vma)
 	if (entry->relocation_count == 0)
 		return false;
 
-	if (!i915_is_ggtt(vma->vm))
+	if (!vma->is_ggtt)
 		return false;
 
 	/* See also use_cpu_reloc() */
@@ -690,8 +687,7 @@ eb_vma_misplaced(struct i915_vma *vma)
 	struct drm_i915_gem_exec_object2 *entry = vma->exec_entry;
 	struct drm_i915_gem_object *obj = vma->obj;
 
-	WARN_ON(entry->flags & __EXEC_OBJECT_NEEDS_MAP &&
-	       !i915_is_ggtt(vma->vm));
+	WARN_ON(entry->flags & __EXEC_OBJECT_NEEDS_MAP && !vma->is_ggtt);
 
 	if (entry->alignment &&
 	    vma->node.start & (entry->alignment - 1))
@@ -869,7 +865,7 @@ i915_gem_execbuffer_relocate_slow(struct drm_device *dev,
 		u64 invalid_offset = (u64)-1;
 		int j;
 
-		user_relocs = to_user_ptr(exec[i].relocs_ptr);
+		user_relocs = u64_to_user_ptr(exec[i].relocs_ptr);
 
 		if (copy_from_user(reloc+total, user_relocs,
 				   exec[i].relocation_count * sizeof(*reloc))) {
@@ -1013,7 +1009,7 @@ validate_exec_list(struct drm_device *dev,
 		invalid_flags |= EXEC_OBJECT_NEEDS_GTT;
 
 	for (i = 0; i < count; i++) {
-		char __user *ptr = to_user_ptr(exec[i].relocs_ptr);
+		char __user *ptr = u64_to_user_ptr(exec[i].relocs_ptr);
 		int length; /* limited by fault_in_pages_readable() */
 
 		if (exec[i].flags & invalid_flags)
@@ -1309,6 +1305,9 @@ i915_gem_ringbuffer_submission(struct i915_execbuffer_params *params,
 	exec_start = params->batch_obj_vm_offset +
 		     params->args_batch_start_offset;
 
+	if (exec_len == 0)
+		exec_len = params->batch_obj->base.size;
+
 	ret = ring->dispatch_execbuffer(params->request,
 					exec_start, exec_len,
 					params->dispatch_flags);
@@ -1325,33 +1324,23 @@ i915_gem_ringbuffer_submission(struct i915_execbuffer_params *params,
 
 /**
  * Find one BSD ring to dispatch the corresponding BSD command.
- * The Ring ID is returned.
+ * The ring index is returned.
  */
-static int gen8_dispatch_bsd_ring(struct drm_device *dev,
-				  struct drm_file *file)
+static unsigned int
+gen8_dispatch_bsd_ring(struct drm_i915_private *dev_priv, struct drm_file *file)
 {
-	struct drm_i915_private *dev_priv = dev->dev_private;
 	struct drm_i915_file_private *file_priv = file->driver_priv;
 
-	/* Check whether the file_priv is using one ring */
-	if (file_priv->bsd_ring)
-		return file_priv->bsd_ring->id;
-	else {
-		/* If no, use the ping-pong mechanism to select one ring */
-		int ring_id;
-
-		mutex_lock(&dev->struct_mutex);
-		if (dev_priv->mm.bsd_ring_dispatch_index == 0) {
-			ring_id = VCS;
-			dev_priv->mm.bsd_ring_dispatch_index = 1;
-		} else {
-			ring_id = VCS2;
-			dev_priv->mm.bsd_ring_dispatch_index = 0;
-		}
-		file_priv->bsd_ring = &dev_priv->ring[ring_id];
-		mutex_unlock(&dev->struct_mutex);
-		return ring_id;
+	/* Check whether the file_priv has already selected one ring. */
+	if ((int)file_priv->bsd_ring < 0) {
+		/* If not, use the ping-pong mechanism to select one. */
+		mutex_lock(&dev_priv->dev->struct_mutex);
+		file_priv->bsd_ring = dev_priv->mm.bsd_ring_dispatch_index;
+		dev_priv->mm.bsd_ring_dispatch_index ^= 1;
+		mutex_unlock(&dev_priv->dev->struct_mutex);
 	}
+
+	return file_priv->bsd_ring;
 }
 
 static struct drm_i915_gem_object *
@@ -1374,6 +1363,64 @@ eb_get_batch(struct eb_vmas *eb)
 	return vma->obj;
 }
 
+#define I915_USER_RINGS (4)
+
+static const enum intel_ring_id user_ring_map[I915_USER_RINGS + 1] = {
+	[I915_EXEC_DEFAULT]	= RCS,
+	[I915_EXEC_RENDER]	= RCS,
+	[I915_EXEC_BLT]		= BCS,
+	[I915_EXEC_BSD]		= VCS,
+	[I915_EXEC_VEBOX]	= VECS
+};
+
+static int
+eb_select_ring(struct drm_i915_private *dev_priv,
+	       struct drm_file *file,
+	       struct drm_i915_gem_execbuffer2 *args,
+	       struct intel_engine_cs **ring)
+{
+	unsigned int user_ring_id = args->flags & I915_EXEC_RING_MASK;
+
+	if (user_ring_id > I915_USER_RINGS) {
+		DRM_DEBUG("execbuf with unknown ring: %u\n", user_ring_id);
+		return -EINVAL;
+	}
+
+	if ((user_ring_id != I915_EXEC_BSD) &&
+	    ((args->flags & I915_EXEC_BSD_MASK) != 0)) {
+		DRM_DEBUG("execbuf with non bsd ring but with invalid "
+			  "bsd dispatch flags: %d\n", (int)(args->flags));
+		return -EINVAL;
+	}
+
+	if (user_ring_id == I915_EXEC_BSD && HAS_BSD2(dev_priv)) {
+		unsigned int bsd_idx = args->flags & I915_EXEC_BSD_MASK;
+
+		if (bsd_idx == I915_EXEC_BSD_DEFAULT) {
+			bsd_idx = gen8_dispatch_bsd_ring(dev_priv, file);
+		} else if (bsd_idx >= I915_EXEC_BSD_RING1 &&
+			   bsd_idx <= I915_EXEC_BSD_RING2) {
+			bsd_idx >>= I915_EXEC_BSD_SHIFT;
+			bsd_idx--;
+		} else {
+			DRM_DEBUG("execbuf with unknown bsd ring: %u\n",
+				  bsd_idx);
+			return -EINVAL;
+		}
+
+		*ring = &dev_priv->ring[_VCS(bsd_idx)];
+	} else {
+		*ring = &dev_priv->ring[user_ring_map[user_ring_id]];
+	}
+
+	if (!intel_ring_initialized(*ring)) {
+		DRM_DEBUG("execbuf with invalid ring: %u\n", user_ring_id);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 static int
 i915_gem_do_execbuffer(struct drm_device *dev, void *data,
 		       struct drm_file *file,
@@ -1381,6 +1428,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
 		       struct drm_i915_gem_exec_object2 *exec)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
+	struct drm_i915_gem_request *req = NULL;
 	struct eb_vmas *eb;
 	struct drm_i915_gem_object *batch_obj;
 	struct drm_i915_gem_exec_object2 shadow_exec_entry;
@@ -1411,51 +1459,9 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
 	if (args->flags & I915_EXEC_IS_PINNED)
 		dispatch_flags |= I915_DISPATCH_PINNED;
 
-	if ((args->flags & I915_EXEC_RING_MASK) > LAST_USER_RING) {
-		DRM_DEBUG("execbuf with unknown ring: %d\n",
-			  (int)(args->flags & I915_EXEC_RING_MASK));
-		return -EINVAL;
-	}
-
-	if (((args->flags & I915_EXEC_RING_MASK) != I915_EXEC_BSD) &&
-	    ((args->flags & I915_EXEC_BSD_MASK) != 0)) {
-		DRM_DEBUG("execbuf with non bsd ring but with invalid "
-			"bsd dispatch flags: %d\n", (int)(args->flags));
-		return -EINVAL;
-	} 
-
-	if ((args->flags & I915_EXEC_RING_MASK) == I915_EXEC_DEFAULT)
-		ring = &dev_priv->ring[RCS];
-	else if ((args->flags & I915_EXEC_RING_MASK) == I915_EXEC_BSD) {
-		if (HAS_BSD2(dev)) {
-			int ring_id;
-
-			switch (args->flags & I915_EXEC_BSD_MASK) {
-			case I915_EXEC_BSD_DEFAULT:
-				ring_id = gen8_dispatch_bsd_ring(dev, file);
-				ring = &dev_priv->ring[ring_id];
-				break;
-			case I915_EXEC_BSD_RING1:
-				ring = &dev_priv->ring[VCS];
-				break;
-			case I915_EXEC_BSD_RING2:
-				ring = &dev_priv->ring[VCS2];
-				break;
-			default:
-				DRM_DEBUG("execbuf with unknown bsd ring: %d\n",
-					  (int)(args->flags & I915_EXEC_BSD_MASK));
-				return -EINVAL;
-			}
-		} else
-			ring = &dev_priv->ring[VCS];
-	} else
-		ring = &dev_priv->ring[(args->flags & I915_EXEC_RING_MASK) - 1];
-
-	if (!intel_ring_initialized(ring)) {
-		DRM_DEBUG("execbuf with invalid ring: %d\n",
-			  (int)(args->flags & I915_EXEC_RING_MASK));
-		return -EINVAL;
-	}
+	ret = eb_select_ring(dev_priv, file, args, &ring);
+	if (ret)
+		return ret;
 
 	if (args->buffer_count < 1) {
 		DRM_DEBUG("execbuf with %d buffers\n", args->buffer_count);
@@ -1602,11 +1608,13 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
 		params->batch_obj_vm_offset = i915_gem_obj_offset(batch_obj, vm);
 
 	/* Allocate a request for this batch buffer nice and early. */
-	ret = i915_gem_request_alloc(ring, ctx, &params->request);
-	if (ret)
+	req = i915_gem_request_alloc(ring, ctx);
+	if (IS_ERR(req)) {
+		ret = PTR_ERR(req);
 		goto err_batch_unpin;
+	}
 
-	ret = i915_gem_request_add_to_client(params->request, file);
+	ret = i915_gem_request_add_to_client(req, file);
 	if (ret)
 		goto err_batch_unpin;
 
@@ -1622,6 +1630,7 @@ i915_gem_do_execbuffer(struct drm_device *dev, void *data,
 	params->dispatch_flags          = dispatch_flags;
 	params->batch_obj               = batch_obj;
 	params->ctx                     = ctx;
+	params->request                 = req;
 
 	ret = dev_priv->gt.execbuf_submit(params, args, &eb->vmas);
 
@@ -1645,8 +1654,8 @@ err:
 	 * must be freed again. If it was submitted then it is being tracked
 	 * on the active request list and no clean up is required here.
 	 */
-	if (ret && params->request)
-		i915_gem_request_cancel(params->request);
+	if (ret && !IS_ERR_OR_NULL(req))
+		i915_gem_request_cancel(req);
 
 	mutex_unlock(&dev->struct_mutex);
 
@@ -1687,7 +1696,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
 		return -ENOMEM;
 	}
 	ret = copy_from_user(exec_list,
-			     to_user_ptr(args->buffers_ptr),
+			     u64_to_user_ptr(args->buffers_ptr),
 			     sizeof(*exec_list) * args->buffer_count);
 	if (ret != 0) {
 		DRM_DEBUG("copy %d exec entries failed %d\n",
@@ -1723,7 +1732,7 @@ i915_gem_execbuffer(struct drm_device *dev, void *data,
 	ret = i915_gem_do_execbuffer(dev, data, file, &exec2, exec2_list);
 	if (!ret) {
 		struct drm_i915_gem_exec_object __user *user_exec_list =
-			to_user_ptr(args->buffers_ptr);
+			u64_to_user_ptr(args->buffers_ptr);
 
 		/* Copy the new buffer offsets back to the user's exec list. */
 		for (i = 0; i < args->buffer_count; i++) {
@@ -1777,7 +1786,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
 		return -ENOMEM;
 	}
 	ret = copy_from_user(exec2_list,
-			     to_user_ptr(args->buffers_ptr),
+			     u64_to_user_ptr(args->buffers_ptr),
 			     sizeof(*exec2_list) * args->buffer_count);
 	if (ret != 0) {
 		DRM_DEBUG("copy %d exec entries failed %d\n",
@@ -1790,7 +1799,7 @@ i915_gem_execbuffer2(struct drm_device *dev, void *data,
 	if (!ret) {
 		/* Copy the new buffer offsets back to the user's exec list. */
 		struct drm_i915_gem_exec_object2 __user *user_exec_list =
-				   to_user_ptr(args->buffers_ptr);
+				   u64_to_user_ptr(args->buffers_ptr);
 		int i;
 
 		for (i = 0; i < args->buffer_count; i++) {

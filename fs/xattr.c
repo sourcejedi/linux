@@ -192,7 +192,7 @@ vfs_getxattr_alloc(struct dentry *dentry, const char *name, char **xattr_value,
 	if (!inode->i_op->getxattr)
 		return -EOPNOTSUPP;
 
-	error = inode->i_op->getxattr(dentry, name, NULL, 0);
+	error = inode->i_op->getxattr(dentry, inode, name, NULL, 0);
 	if (error < 0)
 		return error;
 
@@ -203,7 +203,7 @@ vfs_getxattr_alloc(struct dentry *dentry, const char *name, char **xattr_value,
 		memset(value, 0, error + 1);
 	}
 
-	error = inode->i_op->getxattr(dentry, name, value, error);
+	error = inode->i_op->getxattr(dentry, inode, name, value, error);
 	*xattr_value = value;
 	return error;
 }
@@ -236,7 +236,7 @@ vfs_getxattr(struct dentry *dentry, const char *name, void *value, size_t size)
 	}
 nolsm:
 	if (inode->i_op->getxattr)
-		error = inode->i_op->getxattr(dentry, name, value, size);
+		error = inode->i_op->getxattr(dentry, inode, name, value, size);
 	else
 		error = -EOPNOTSUPP;
 
@@ -691,14 +691,16 @@ xattr_resolve_name(const struct xattr_handler **handlers, const char **name)
  * Find the handler for the prefix and dispatch its get() operation.
  */
 ssize_t
-generic_getxattr(struct dentry *dentry, const char *name, void *buffer, size_t size)
+generic_getxattr(struct dentry *dentry, struct inode *inode,
+		 const char *name, void *buffer, size_t size)
 {
 	const struct xattr_handler *handler;
 
 	handler = xattr_resolve_name(dentry->d_sb->s_xattr, &name);
 	if (IS_ERR(handler))
 		return PTR_ERR(handler);
-	return handler->get(handler, dentry, name, buffer, size);
+	return handler->get(handler, dentry, inode,
+			    name, buffer, size);
 }
 
 /*
@@ -940,7 +942,7 @@ ssize_t simple_xattr_list(struct inode *inode, struct simple_xattrs *xattrs,
 	bool trusted = capable(CAP_SYS_ADMIN);
 	struct simple_xattr *xattr;
 	ssize_t remaining_size = size;
-	int err;
+	int err = 0;
 
 #ifdef CONFIG_FS_POSIX_ACL
 	if (inode->i_acl) {
@@ -965,11 +967,11 @@ ssize_t simple_xattr_list(struct inode *inode, struct simple_xattrs *xattrs,
 
 		err = xattr_list_one(&buffer, &remaining_size, xattr->name);
 		if (err)
-			return err;
+			break;
 	}
 	spin_unlock(&xattrs->lock);
 
-	return size - remaining_size;
+	return err ? err : size - remaining_size;
 }
 
 /*

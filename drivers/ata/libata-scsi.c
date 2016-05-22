@@ -174,13 +174,13 @@ static ssize_t ata_scsi_park_show(struct device *device,
 	struct ata_port *ap;
 	struct ata_link *link;
 	struct ata_device *dev;
-	unsigned long flags, now;
+	unsigned long now;
 	unsigned int uninitialized_var(msecs);
 	int rc = 0;
 
 	ap = ata_shost_to_port(sdev->host);
 
-	spin_lock_irqsave(ap->lock, flags);
+	spin_lock_irq(ap->lock);
 	dev = ata_scsi_find_dev(ap, sdev);
 	if (!dev) {
 		rc = -ENODEV;
@@ -675,19 +675,18 @@ static int ata_ioc32(struct ata_port *ap)
 int ata_sas_scsi_ioctl(struct ata_port *ap, struct scsi_device *scsidev,
 		     int cmd, void __user *arg)
 {
-	int val = -EINVAL, rc = -EINVAL;
+	unsigned long val;
+	int rc = -EINVAL;
 	unsigned long flags;
 
 	switch (cmd) {
-	case ATA_IOC_GET_IO32:
+	case HDIO_GET_32BIT:
 		spin_lock_irqsave(ap->lock, flags);
 		val = ata_ioc32(ap);
 		spin_unlock_irqrestore(ap->lock, flags);
-		if (copy_to_user(arg, &val, 1))
-			return -EFAULT;
-		return 0;
+		return put_user(val, (unsigned long __user *)arg);
 
-	case ATA_IOC_SET_IO32:
+	case HDIO_SET_32BIT:
 		val = (unsigned long) arg;
 		rc = 0;
 		spin_lock_irqsave(ap->lock, flags);
@@ -1110,7 +1109,7 @@ static void ata_scsi_sdev_config(struct scsi_device *sdev)
  *	@rq: request to be checked
  *
  *	ATAPI commands which transfer variable length data to host
- *	might overflow due to application error or hardare bug.  This
+ *	might overflow due to application error or hardware bug.  This
  *	function checks whether overflow should be drained and ignored
  *	for @request.
  *
@@ -3440,14 +3439,11 @@ static inline void ata_scsi_dump_cdb(struct ata_port *ap,
 {
 #ifdef ATA_DEBUG
 	struct scsi_device *scsidev = cmd->device;
-	u8 *scsicmd = cmd->cmnd;
 
-	DPRINTK("CDB (%u:%d,%d,%d) %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	DPRINTK("CDB (%u:%d,%d,%d) %9ph\n",
 		ap->print_id,
 		scsidev->channel, scsidev->id, scsidev->lun,
-		scsicmd[0], scsicmd[1], scsicmd[2], scsicmd[3],
-		scsicmd[4], scsicmd[5], scsicmd[6], scsicmd[7],
-		scsicmd[8]);
+		cmd->cmnd);
 #endif
 }
 

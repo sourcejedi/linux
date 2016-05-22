@@ -536,7 +536,7 @@ static int ib_nl_send_msg(struct ib_sa_query *query, gfp_t gfp_mask)
 	data = ibnl_put_msg(skb, &nlh, query->seq, 0, RDMA_NL_LS,
 			    RDMA_NL_LS_OP_RESOLVE, NLM_F_REQUEST);
 	if (!data) {
-		kfree_skb(skb);
+		nlmsg_free(skb);
 		return -EMSGSIZE;
 	}
 
@@ -864,13 +864,12 @@ static void update_sm_ah(struct work_struct *work)
 	struct ib_ah_attr   ah_attr;
 
 	if (ib_query_port(port->agent->device, port->port_num, &port_attr)) {
-		printk(KERN_WARNING "Couldn't query port\n");
+		pr_warn("Couldn't query port\n");
 		return;
 	}
 
 	new_ah = kmalloc(sizeof *new_ah, GFP_KERNEL);
 	if (!new_ah) {
-		printk(KERN_WARNING "Couldn't allocate new SM AH\n");
 		return;
 	}
 
@@ -880,16 +879,21 @@ static void update_sm_ah(struct work_struct *work)
 	new_ah->pkey_index = 0;
 	if (ib_find_pkey(port->agent->device, port->port_num,
 			 IB_DEFAULT_PKEY_FULL, &new_ah->pkey_index))
-		printk(KERN_ERR "Couldn't find index for default PKey\n");
+		pr_err("Couldn't find index for default PKey\n");
 
 	memset(&ah_attr, 0, sizeof ah_attr);
 	ah_attr.dlid     = port_attr.sm_lid;
 	ah_attr.sl       = port_attr.sm_sl;
 	ah_attr.port_num = port->port_num;
+	if (port_attr.grh_required) {
+		ah_attr.ah_flags = IB_AH_GRH;
+		ah_attr.grh.dgid.global.subnet_prefix = cpu_to_be64(port_attr.subnet_prefix);
+		ah_attr.grh.dgid.global.interface_id = cpu_to_be64(IB_SA_WELL_KNOWN_GUID);
+	}
 
 	new_ah->ah = ib_create_ah(port->agent->qp->pd, &ah_attr);
 	if (IS_ERR(new_ah->ah)) {
-		printk(KERN_WARNING "Couldn't create new SM AH\n");
+		pr_warn("Couldn't create new SM AH\n");
 		kfree(new_ah);
 		return;
 	}
@@ -1071,7 +1075,7 @@ int ib_init_ah_from_path(struct ib_device *device, u8 port_num,
 		}
 	}
 
-	if (rec->hop_limit > 1 || use_roce) {
+	if (rec->hop_limit > 0 || use_roce) {
 		ah_attr->ah_flags = IB_AH_GRH;
 		ah_attr->grh.dgid = rec->dgid;
 
@@ -1221,7 +1225,7 @@ static void ib_sa_path_rec_callback(struct ib_sa_query *sa_query,
 		rec.net = NULL;
 		rec.ifindex = 0;
 		rec.gid_type = IB_GID_TYPE_IB;
-		memset(rec.dmac, 0, ETH_ALEN);
+		eth_zero_addr(rec.dmac);
 		query->callback(status, &rec, query->context);
 	} else
 		query->callback(status, NULL, query->context);
@@ -1800,13 +1804,13 @@ static int __init ib_sa_init(void)
 
 	ret = ib_register_client(&sa_client);
 	if (ret) {
-		printk(KERN_ERR "Couldn't register ib_sa client\n");
+		pr_err("Couldn't register ib_sa client\n");
 		goto err1;
 	}
 
 	ret = mcast_init();
 	if (ret) {
-		printk(KERN_ERR "Couldn't initialize multicast handling\n");
+		pr_err("Couldn't initialize multicast handling\n");
 		goto err2;
 	}
 
@@ -1816,7 +1820,7 @@ static int __init ib_sa_init(void)
 		goto err3;
 	}
 
-	if (ibnl_add_client(RDMA_NL_LS, RDMA_NL_LS_NUM_OPS,
+	if (ibnl_add_client(RDMA_NL_LS, ARRAY_SIZE(ib_sa_cb_table),
 			    ib_sa_cb_table)) {
 		pr_err("Failed to add netlink callback\n");
 		ret = -EINVAL;
