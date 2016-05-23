@@ -1284,8 +1284,10 @@ static void apic_timer_expired(struct kvm_lapic *apic)
 	if (swait_active(q))
 		swake_up(q);
 
-	if (apic_lvtt_tscdeadline(apic))
+	if (apic_lvtt_tscdeadline(apic)) {
 		ktimer->expired_tscdeadline = ktimer->tscdeadline;
+		ktimer->expired_advance_ns = ktimer->advance_ns;
+	}
 }
 
 /*
@@ -1328,11 +1330,50 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
 	tsc_deadline = apic->lapic_timer.expired_tscdeadline;
 	apic->lapic_timer.expired_tscdeadline = 0;
 	guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+
+	/*
+	 * Tracepoint to help you configure lapic_timer_advance_ns.
+	 * E.g. use the largest positive value reported by this tracepoint.
+	 *
+	 * So we won't mind the occasional bogus values (see comment below).
+	 * Or that it was defined to return guest TSC ticks instead of ns ;-).
+	 */
 	trace_kvm_wait_lapic_expire(vcpu->vcpu_id, guest_tsc - tsc_deadline);
 
-	/* __delay is delay_tsc whenever the hardware has TSC, thus always.  */
-	if (guest_tsc < tsc_deadline)
-		__delay(tsc_deadline - guest_tsc);
+	if (guest_tsc < tsc_deadline) {
+		unsigned long this_tsc_khz = vcpu->arch.virtual_tsc_khz;
+		u64 delay_ns;
+
+		delay_ns = (tsc_deadline - guest_tsc) * 1000000ULL;
+		do_div(delay_ns, this_tsc_khz);
+
+		/*
+		 * When guest_tsc is adjusted backwards, it will take longer
+		 * to reach the deadline than we predicted.  The hrtimer
+		 * will fire at the predicted time because no-one notifies us
+		 * to reset it :(.  Then busy-waiting for the deadline could
+		 * lock up the host cpu for an indefinite period.
+		 *
+		 * Hopefully there aren't any more obscure problems.
+		 *
+		 * Check here to avoid lockup.  Then the emulated deadline
+		 * timer will fire early (the same as before we implemented
+		 * lapic_timer_advance_ns).  I'm stressing this because it's a
+		 * correctness issue.  The textbook definition of a delay /
+		 * timer is that you can _not_ wake earlier, only later.  Also
+		 * if guest_tsc is set forwards, the emulated timer could be
+		 * delayed for an indefinite period.
+		 *
+		 * When this is fixed we can upgrade the check to WARN_ON(1).
+		 */
+		if (delay_ns > apic->lapic_timer.expired_advance_ns) {
+			kvm_pr_unimpl("%lluns is tool long to busy-wait. maybe guest tsc was adjusted (backwards)\n",
+				      delay_ns);
+			delay_ns = apic->lapic_timer.expired_advance_ns;
+		}
+
+		ndelay(delay_ns);
+	}
 }
 
 static void start_apic_timer(struct kvm_lapic *apic)
@@ -1384,6 +1425,7 @@ static void start_apic_timer(struct kvm_lapic *apic)
 		/* lapic timer in tsc deadline mode */
 		u64 guest_tsc, tscdeadline = apic->lapic_timer.tscdeadline;
 		u64 ns = 0;
+		u64 timer_advance_ns = READ_ONCE(lapic_timer_advance_ns);
 		ktime_t expire;
 		struct kvm_vcpu *vcpu = apic->vcpu;
 		unsigned long this_tsc_khz = vcpu->arch.virtual_tsc_khz;
@@ -1400,7 +1442,8 @@ static void start_apic_timer(struct kvm_lapic *apic)
 			ns = (tscdeadline - guest_tsc) * 1000000ULL;
 			do_div(ns, this_tsc_khz);
 			expire = ktime_add_ns(now, ns);
-			expire = ktime_sub_ns(expire, lapic_timer_advance_ns);
+			expire = ktime_sub_ns(expire, timer_advance_ns);
+			apic->lapic_timer.advance_ns = timer_advance_ns;
 			hrtimer_start(&apic->lapic_timer.timer,
 				      expire, HRTIMER_MODE_ABS_PINNED);
 		} else

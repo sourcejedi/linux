@@ -15,6 +15,8 @@ struct kvm_timer {
 	u32 timer_mode_mask;
 	u64 tscdeadline;
 	u64 expired_tscdeadline;
+	u32 advance_ns;				/* hrtimer was set early, by this much */
+	u32 expired_advance_ns;
 	atomic_t pending;			/* accumulated triggered timers */
 };
 
