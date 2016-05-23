@@ -1335,8 +1335,8 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
 	 * Tracepoint to help you configure lapic_timer_advance_ns.
 	 * E.g. use the largest positive value reported by this tracepoint.
 	 *
-	 * So we won't mind the occasional bogus values (see comment below).
-	 * Or that it was defined to return guest TSC ticks instead of ns ;-).
+	 * So we won't worry that it was defined to return guest TSC ticks
+	 * instead of nanoseconds ;-).
 	 */
 	trace_kvm_wait_lapic_expire(vcpu->vcpu_id, guest_tsc - tsc_deadline);
 
@@ -1347,28 +1347,13 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
 		delay_ns = (tsc_deadline - guest_tsc) * 1000000ULL;
 		do_div(delay_ns, this_tsc_khz);
 
-		/*
-		 * When guest_tsc is adjusted backwards, it will take longer
-		 * to reach the deadline than we predicted.  The hrtimer
-		 * will fire at the predicted time because no-one notifies us
-		 * to reset it :(.  Then busy-waiting for the deadline could
-		 * lock up the host cpu for an indefinite period.
-		 *
-		 * Hopefully there aren't any more obscure problems.
-		 *
-		 * Check here to avoid lockup.  Then the emulated deadline
-		 * timer will fire early (the same as before we implemented
-		 * lapic_timer_advance_ns).  I'm stressing this because it's a
-		 * correctness issue.  The textbook definition of a delay /
-		 * timer is that you can _not_ wake earlier, only later.  Also
-		 * if guest_tsc is set forwards, the emulated timer could be
-		 * delayed for an indefinite period.
-		 *
-		 * When this is fixed we can upgrade the check to WARN_ON(1).
-		 */
 		if (delay_ns > apic->lapic_timer.expired_advance_ns) {
-			kvm_pr_unimpl("%lluns is tool long to busy-wait. maybe guest tsc was adjusted (backwards)\n",
-				      delay_ns);
+			vcpu_err(vcpu,
+			         "timer for tsc_deadline fired too far in advance: %lluns\n",
+			         delay_ns);
+			WARN_ON(1);
+
+			/* avoid lockup. emulated timer will fire early */
 			delay_ns = apic->lapic_timer.expired_advance_ns;
 		}
 
@@ -2047,6 +2032,32 @@ void __kvm_migrate_apic_timer(struct kvm_vcpu *vcpu)
 	timer = &vcpu->arch.apic->lapic_timer.timer;
 	if (hrtimer_cancel(timer))
 		hrtimer_start_expires(timer, HRTIMER_MODE_ABS_PINNED);
+}
+
+/*
+ * kvm_apic_tsc_update - called on guest tsc update
+ *
+ * Update the emulated TSC deadline timer.
+ * Timer remains inactive if both new and old deadlines are in the past.
+ */
+void kvm_apic_tsc_update(struct kvm_vcpu *vcpu)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+	bool timer_active;
+	u64 guest_tsc;
+
+	if (!lapic_in_kernel(vcpu) || !apic_lvtt_tscdeadline(apic))
+		return;
+
+	timer_active = hrtimer_cancel(&apic->lapic_timer.timer);
+	guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+
+	/*
+	 * FIXME.  start_apic_timer() clears lapic_timer.pending.
+	 * Is that a problem?
+	 */	
+	if (timer_active || guest_tsc < apic->lapic_timer.tscdeadline)
+		start_apic_timer(apic);
 }
 
 /*

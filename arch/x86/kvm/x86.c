@@ -1522,6 +1522,8 @@ void kvm_write_tsc(struct kvm_vcpu *vcpu, struct msr_data *msr)
 	kvm_x86_ops->write_tsc_offset(vcpu, offset);
 	raw_spin_unlock_irqrestore(&kvm->arch.tsc_write_lock, flags);
 
+	kvm_apic_tsc_update(vcpu);
+
 	spin_lock(&kvm->arch.pvclock_gtod_sync_lock);
 	if (!matched) {
 		kvm->arch.nr_vcpus_matched_tsc = 0;
@@ -2094,6 +2096,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 			if (!msr_info->host_initiated) {
 				s64 adj = data - vcpu->arch.ia32_tsc_adjust_msr;
 				adjust_tsc_offset_guest(vcpu, adj);
+				kvm_apic_tsc_update(vcpu);
 			}
 			vcpu->arch.ia32_tsc_adjust_msr = data;
 		}
