@@ -15,7 +15,7 @@ struct kvm_timer {
 	u32 timer_mode_mask;
 	u64 tscdeadline;
 	u64 expired_tscdeadline;
-	atomic_t pending;			/* accumulated triggered timers */
+	atomic_t pending;			/* flag: timer has triggered */
 };
 
 struct kvm_lapic {
