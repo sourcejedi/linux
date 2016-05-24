@@ -1278,7 +1278,7 @@ static void apic_timer_expired(struct kvm_lapic *apic)
 	if (atomic_read(&apic->lapic_timer.pending))
 		return;
 
-	atomic_inc(&apic->lapic_timer.pending);
+	atomic_set(&apic->lapic_timer.pending, 1);
 	kvm_set_pending_timer(vcpu);
 
 	if (swait_active(q))
@@ -1923,7 +1923,7 @@ void kvm_inject_apic_timer_irqs(struct kvm_vcpu *vcpu)
 {
 	struct kvm_lapic *apic = vcpu->arch.apic;
 
-	if (atomic_read(&apic->lapic_timer.pending) > 0) {
+	if (atomic_read(&apic->lapic_timer.pending)) {
 		kvm_apic_local_deliver(apic, APIC_LVTT);
 		if (apic_lvtt_tscdeadline(apic))
 			apic->lapic_timer.tscdeadline = 0;
