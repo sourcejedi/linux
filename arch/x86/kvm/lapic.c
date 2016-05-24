@@ -2063,6 +2063,31 @@ void __kvm_migrate_apic_timer(struct kvm_vcpu *vcpu)
 }
 
 /*
+ * kvm_apic_tsc_update - called when guest or host changes the TSC
+ *
+ * Update the emulated TSC deadline timer.
+ *
+ * It is also required if host changes TSC frequency scaling.  It is not
+ * required when we "catch up" the TSC, because that is maintaining the
+ * relationship between TSC and real time.
+ */
+void kvm_apic_tsc_update(struct kvm_vcpu *vcpu)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+
+	if (!lapic_in_kernel(vcpu) || !apic_lvtt_tscdeadline(apic))
+		return;
+
+	hrtimer_cancel(&apic->lapic_timer.timer);
+
+	/*
+	 * Note when the timer fires, it clears the tsc deadline.
+	 * So we won't cause the timer to fire a second time.
+	 */
+	start_apic_timer(apic);
+}
+
+/*
  * apic_sync_pv_eoi_from_guest - called on vmexit or cancel interrupt
  *
  * Detect whether guest triggered PV EOI since the

@@ -1531,6 +1531,8 @@ void kvm_write_tsc(struct kvm_vcpu *vcpu, struct msr_data *msr)
 
 	kvm_track_tsc_matching(vcpu);
 	spin_unlock(&kvm->arch.pvclock_gtod_sync_lock);
+
+	kvm_apic_tsc_update(vcpu);
 }
 
 EXPORT_SYMBOL_GPL(kvm_write_tsc);
@@ -2094,6 +2096,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 			if (!msr_info->host_initiated) {
 				s64 adj = data - vcpu->arch.ia32_tsc_adjust_msr;
 				adjust_tsc_offset_guest(vcpu, adj);
+				kvm_apic_tsc_update(vcpu);
 			}
 			vcpu->arch.ia32_tsc_adjust_msr = data;
 		}
@@ -3484,8 +3487,10 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (user_tsc_khz == 0)
 			user_tsc_khz = tsc_khz;
 
-		if (!kvm_set_tsc_khz(vcpu, user_tsc_khz))
+		if (!kvm_set_tsc_khz(vcpu, user_tsc_khz)) {
 			r = 0;
+			kvm_apic_tsc_update(vcpu);
+		}
 
 		goto out;
 	}
