@@ -2562,7 +2562,6 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_READONLY_MEM:
 	case KVM_CAP_HYPERV_TIME:
 	case KVM_CAP_IOAPIC_POLARITY_IGNORED:
-	case KVM_CAP_TSC_DEADLINE_TIMER:
 	case KVM_CAP_ENABLE_CAP_VM:
 	case KVM_CAP_DISABLE_QUIRKS:
 	case KVM_CAP_SET_BOOT_CPU_ID:
@@ -2615,6 +2614,17 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 		break;
 	case KVM_CAP_TSC_CONTROL:
 		r = kvm_has_tsc_control;
+		break;
+	case KVM_CAP_TSC_DEADLINE_TIMER:
+		/*
+		 * We like to expose a TSC deadline timer emulated using any
+		 * hardware timer (TSC deadline timer will just be cheaper).
+		 * We want TSC to match the other timer, not slow down or
+		 * stall.  If we actually have the deadline timer, TSC will
+		 * surely pass this check (Linux assumes so :).
+		 */
+		r = boot_cpu_has(X86_FEATURE_CONSTANT_TSC) &&
+		    boot_cpu_has(X86_FEATURE_NONSTOP_TSC);
 		break;
 	default:
 		r = 0;
