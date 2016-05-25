@@ -1392,8 +1392,6 @@ static void start_apic_timer(struct kvm_lapic *apic)
 		if (unlikely(!tscdeadline || !this_tsc_khz))
 			return;
 
-		local_irq_save(flags);
-
 		now = apic->lapic_timer.timer.base->get_time();
 		guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
 		if (likely(tscdeadline > guest_tsc)) {
@@ -1403,10 +1401,11 @@ static void start_apic_timer(struct kvm_lapic *apic)
 			expire = ktime_sub_ns(expire, lapic_timer_advance_ns);
 			hrtimer_start(&apic->lapic_timer.timer,
 				      expire, HRTIMER_MODE_ABS_PINNED);
-		} else
+		} else {
+			local_irq_save(flags);
 			apic_timer_expired(apic);
-
-		local_irq_restore(flags);
+			local_irq_restore(flags);
+		}
 	}
 }
 
