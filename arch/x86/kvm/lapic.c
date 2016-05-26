@@ -49,6 +49,8 @@
 #define mod_64(x, y) ((x) % (y))
 #endif
 
+#define div_64_round_up(n, d) div64_u64((n) + (d) - 1, (d))
+
 #define PRId64 "d"
 #define PRIx64 "llx"
 #define PRIu64 "u"
@@ -1340,13 +1342,9 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
 
 	if (guest_tsc < tsc_deadline) {
 		unsigned long this_tsc_khz = vcpu->arch.virtual_tsc_khz;
-		u64 delay_ns;
+		u64 delay, max_delay;
 
-		delay_ns = (tsc_deadline - guest_tsc) * 1000000ULL;
-
-		/* this_tsc_khz is not strictly accurate */
-
-		do_div(delay_ns, this_tsc_khz);
+		delay = guest_tsc - tsc_deadline;
 
 		/*
 		 * When guest_tsc is adjusted backwards, it will take longer
@@ -1367,13 +1365,17 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
 		 *
 		 * When this is fixed we can upgrade the check to WARN_ON(1).
 		 */
-		if (delay_ns > lapic_timer_advance_ns) {
-			kvm_pr_unimpl("%lluns is too long to busy-wait. maybe guest tsc was adjusted (backwards)\n",
-				      delay_ns);
-			delay_ns = lapic_timer_advance_ns;
+		max_delay = div_64_round_up(lapic_timer_advance_ns * this_tsc_khz,
+		                            1000000ULL);
+
+		if (delay > max_delay) {
+			kvm_pr_unimpl("%llu cycles is too long to busy-wait. maybe guest tsc was adjusted (backwards)\n",
+				      delay);
+			delay = max_delay;
 		}
 
-		ndelay(delay_ns);
+		/* FIXME: delay = kvm_tsc_unscale(delay); */
+		__delay(delay);
 	}
 }
 
