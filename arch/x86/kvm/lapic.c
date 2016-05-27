@@ -1735,6 +1735,7 @@ void kvm_lapic_reset(struct kvm_vcpu *vcpu, bool init_event)
 
 	/* Stop the timer in case it's a reset to an active apic */
 	hrtimer_cancel(&apic->lapic_timer.timer);
+	atomic_set(&apic->lapic_timer.pending, 0);
 
 	if (!init_event)
 		kvm_apic_set_id(apic, vcpu->vcpu_id);
