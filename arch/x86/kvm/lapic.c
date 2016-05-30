@@ -1919,15 +1919,66 @@ int kvm_apic_accept_pic_intr(struct kvm_vcpu *vcpu)
 	return r;
 }
 
+/*
+ * If TSC drifted forwards relative to timer, then we can't fire the IRQ yet
+ * and need to recalculate the timer.
+ */
+int tscdeadline_check_for_reschedule(struct kvm_vcpu *vcpu)
+{
+	struct kvm_lapic *apic = vcpu->arch.apic;
+	unsigned long this_tsc_khz = vcpu->arch.virtual_tsc_khz;
+	u64 guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+	u64 advance, max_advance;
+
+	if (guest_tsc > apic->lapic_timer.tscdeadline)
+		return 0;
+
+	/*
+	 * This timer can be configured to fire early, then busy-wait in
+	 * wait_lapic_expire() to reduce wakeup latency.  Check if we are
+	 * too early.  Otherwise we risk a long busy-wait in the kernel
+	 * with interrupts disabled.  E.g. if there's been a long time
+	 * for the clocks to drift, or they're doing so very quickly.
+	 *
+	 * Also if busy-waiting is implemented on 32-bit, then there
+	 * would be the chance to overflow UDELAY_MAX_MS and wake the
+	 * guest too early.  FIXME this is a minimal concern; it should be relegated to the commit message.
+	 */
+	max_advance = DIV_ROUND_UP_ULL(((u64) lapic_timer_advance_ns) *
+	                             this_tsc_khz, 1000000ULL);
+	/*
+	 * Safety check: require lapic_timer_advance_ns to be at least
+	 * one tick of the guest TSC.  Otherwise tsc_khz could be set low
+	 * to force a longer busy-wait, up to a maximum of 1ms.  It won't
+	 * hurt any real use case (and the timer precision would already
+	 * be highly degraded).
+	 */
+	if (max_advance <= 1)
+		max_advance = 0;
+
+	advance = apic->lapic_timer.tscdeadline - guest_tsc;
+	if (advance <= max_advance)
+		return 0;
+
+	start_apic_timer(apic); /* recalculate timer */
+
+	return 1;
+}
+
 void kvm_inject_apic_timer_irqs(struct kvm_vcpu *vcpu)
 {
 	struct kvm_lapic *apic = vcpu->arch.apic;
 
 	if (atomic_read(&apic->lapic_timer.pending)) {
-		kvm_apic_local_deliver(apic, APIC_LVTT);
-		if (apic_lvtt_tscdeadline(apic))
-			apic->lapic_timer.tscdeadline = 0;
 		atomic_set(&apic->lapic_timer.pending, 0);
+
+		if (apic_lvtt_tscdeadline(apic)) {
+			if (tscdeadline_check_for_reschedule(vcpu))
+				return;
+
+			apic->lapic_timer.tscdeadline = 0;
+		}
+		kvm_apic_local_deliver(apic, APIC_LVTT);
 	}
 }
 
