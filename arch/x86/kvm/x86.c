@@ -6712,7 +6712,7 @@ out:
 	return r;
 }
 
-static inline int vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
+static inline void vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
 {
 	if (!kvm_arch_vcpu_runnable(vcpu) &&
 	    (!kvm_x86_ops->pre_block || kvm_x86_ops->pre_block(vcpu) == 0)) {
@@ -6724,25 +6724,18 @@ static inline int vcpu_block(struct kvm *kvm, struct kvm_vcpu *vcpu)
 			kvm_x86_ops->post_block(vcpu);
 
 		if (!kvm_check_request(KVM_REQ_UNHALT, vcpu))
-			return 1;
+			return;
 	}
 
 	kvm_apic_accept_events(vcpu);
 	switch(vcpu->arch.mp_state) {
 	case KVM_MP_STATE_HALTED:
 		vcpu->arch.pv.pv_unhalted = false;
-		vcpu->arch.mp_state =
-			KVM_MP_STATE_RUNNABLE;
+		vcpu->arch.mp_state = KVM_MP_STATE_RUNNABLE;
 	case KVM_MP_STATE_RUNNABLE:
 		vcpu->arch.apf.halted = false;
 		break;
-	case KVM_MP_STATE_INIT_RECEIVED:
-		break;
-	default:
-		return -EINTR;
-		break;
 	}
-	return 1;
 }
 
 static inline bool kvm_vcpu_running(struct kvm_vcpu *vcpu)
@@ -6761,12 +6754,11 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 	for (;;) {
 		if (kvm_vcpu_running(vcpu)) {
 			r = vcpu_enter_guest(vcpu);
+			if (r <= 0)
+				break;
 		} else {
-			r = vcpu_block(kvm, vcpu);
+			vcpu_block(kvm, vcpu);
 		}
-
-		if (r <= 0)
-			break;
 
 		clear_bit(KVM_REQ_PENDING_TIMER, &vcpu->requests);
 		if (kvm_cpu_has_pending_timer(vcpu))
