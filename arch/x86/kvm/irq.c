@@ -138,10 +138,12 @@ int kvm_cpu_get_interrupt(struct kvm_vcpu *v)
 }
 EXPORT_SYMBOL_GPL(kvm_cpu_get_interrupt);
 
-void kvm_inject_pending_timer_irqs(struct kvm_vcpu *vcpu)
+int kvm_inject_pending_timer_irqs(struct kvm_vcpu *vcpu)
 {
 	if (lapic_in_kernel(vcpu))
-		kvm_inject_apic_timer_irqs(vcpu);
+		return kvm_inject_apic_timer_irqs(vcpu);
+
+	return -1;
 }
 EXPORT_SYMBOL_GPL(kvm_inject_pending_timer_irqs);
 

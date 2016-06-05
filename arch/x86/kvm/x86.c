@@ -1745,7 +1745,7 @@ static int kvm_guest_time_update(struct kvm_vcpu *v)
 	if (unlikely(tgt_tsc_khz == 0)) {
 		local_irq_restore(flags);
 		kvm_make_request(KVM_REQ_CLOCK_UPDATE, v);
-		return 1;
+		return -1;
 	}
 	if (!use_master_clock) {
 		host_tsc = rdtsc();
@@ -6456,15 +6456,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 			kvm_mmu_unload(vcpu);
 		if (kvm_check_request(KVM_REQ_MIGRATE_TIMER, vcpu))
 			__kvm_migrate_timers(vcpu);
-		if (kvm_check_request(KVM_REQ_MASTERCLOCK_UPDATE, vcpu))
-			kvm_gen_update_masterclock(vcpu->kvm);
-		if (kvm_check_request(KVM_REQ_GLOBAL_CLOCK_UPDATE, vcpu))
-			kvm_gen_kvmclock_update(vcpu);
-		if (kvm_check_request(KVM_REQ_CLOCK_UPDATE, vcpu)) {
-			r = kvm_guest_time_update(vcpu);
-			if (unlikely(r))
-				goto out;
-		}
 		if (kvm_check_request(KVM_REQ_MMU_SYNC, vcpu))
 			kvm_mmu_sync_roots(vcpu);
 		if (kvm_check_request(KVM_REQ_TLB_FLUSH, vcpu))
@@ -6695,9 +6686,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		profile_hit(KVM_PROFILING, (void *)rip);
 	}
 
-	if (unlikely(vcpu->arch.tsc_always_catchup))
-		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
-
 	if (vcpu->arch.apic_attention)
 		kvm_lapic_sync_from_vapic(vcpu);
 
@@ -6748,14 +6736,48 @@ static inline bool kvm_vcpu_running(struct kvm_vcpu *vcpu)
 		!vcpu->arch.apf.halted);
 }
 
+static inline int vcpu_update_clock(struct kvm_vcpu *vcpu)
+{
+	int r;
+
+	if (vcpu->requests) {
+		if (kvm_check_request(KVM_REQ_MASTERCLOCK_UPDATE, vcpu))
+			kvm_gen_update_masterclock(vcpu->kvm);
+		if (kvm_check_request(KVM_REQ_GLOBAL_CLOCK_UPDATE, vcpu))
+			kvm_gen_kvmclock_update(vcpu);
+		if (kvm_check_request(KVM_REQ_CLOCK_UPDATE, vcpu)) {
+			r = kvm_guest_time_update(vcpu);
+			if (unlikely(r))
+				return r;
+		}
+	}
+	if (unlikely(vcpu->arch.tsc_always_catchup))
+		kvm_make_request(KVM_REQ_CLOCK_UPDATE, vcpu);
+
+	return 0;
+}
+
 static int vcpu_run(struct kvm_vcpu *vcpu)
 {
 	int r;
+	int clock_bad;
 	struct kvm *kvm = vcpu->kvm;
 
 	vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
 
 	for (;;) {
+		clock_bad = vcpu_update_clock(vcpu);
+		if (unlikely(clock_bad)) {
+			/* temporary failure (cpu hotplug) */
+			goto retry;
+		}
+
+		clear_bit(KVM_REQ_PENDING_TIMER, &vcpu->requests);
+		if (kvm_cpu_has_pending_timer(vcpu)) {
+			if (kvm_inject_pending_timer_irqs(vcpu))
+				vcpu_unhalt(vcpu);
+		}
+
 		if (kvm_vcpu_running(vcpu)) {
 			r = vcpu_enter_guest(vcpu);
 			if (r <= 0)
@@ -6763,12 +6785,7 @@ static int vcpu_run(struct kvm_vcpu *vcpu)
 		} else {
 			vcpu_block(kvm, vcpu);
 		}
-
-		clear_bit(KVM_REQ_PENDING_TIMER, &vcpu->requests);
-		if (kvm_cpu_has_pending_timer(vcpu)) {
-			kvm_inject_pending_timer_irqs(vcpu);
-			vcpu_unhalt(vcpu);
-		}
+retry:
 
 		if (dm_request_for_irq_injection(vcpu) &&
 			kvm_vcpu_ready_for_interrupt_injection(vcpu)) {
