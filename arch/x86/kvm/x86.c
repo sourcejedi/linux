@@ -1756,13 +1756,8 @@ static int kvm_guest_time_update(struct kvm_vcpu *v)
 
 	/*
 	 * We may have to catch up the TSC to match elapsed wall clock
-	 * time for two reasons, even if kvmclock is used.
-	 *   1) CPU could have been running below the maximum TSC rate
-	 *   2) Broken TSC compensation resets the base at each VCPU
-	 *      entry to avoid unknown leaps of TSC even when running
-	 *      again on the same CPU.  This may cause apparent elapsed
-	 *      time to disappear, and the guest to stand still or run
-	 *	very slowly.
+	 * time even if kvmclock is used.
+	 * CPU could have been running below the maximum TSC rate.
 	 */
 	if (vcpu->tsc_catchup) {
 		u64 tsc = compute_guest_tsc(v, kernel_ns);
@@ -2735,10 +2730,21 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		if (tsc_delta < 0)
 			mark_tsc_unstable("KVM discovered backwards TSC");
 		if (check_tsc_unstable()) {
-			u64 offset = kvm_compute_tsc_offset(vcpu,
-						vcpu->arch.last_guest_tsc);
-			kvm_x86_ops->write_tsc_offset(vcpu, offset);
+			u64 target_tsc, tsc, kernel_ns;
+
 			vcpu->arch.tsc_catchup = 1;
+
+			/* reset TSC to avoid it jumping back (or forwards) */
+			target_tsc = vcpu->arch.last_guest_tsc;
+
+			/* then catch it up otherwise time will stand still */
+			tsc = kvm_read_l1_tsc(v, rdtsc());
+			kernel_ns = get_kernel_ns();
+			target_tsc = max(target_tsc,
+					 compute_guest_tsc(v, kernel_ns));
+
+			adjust_tsc_offset_guest(v, target_tsc - tsc);
+			vcpu->arch.last_guest_tsc = target_tsc;
 		}
 		/*
 		 * On a host with synchronized TSC, there is no need to update
