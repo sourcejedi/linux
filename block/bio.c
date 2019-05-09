@@ -1732,16 +1732,113 @@ defer:
 	schedule_work(&bio_dirty_work);
 }
 
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end)
+/*
+ * We switched to per-cpu inflight counters, but we still want to report
+ * an overall "# of milliseconds spent doing I/Os".
+ *
+ * At the start and end of an I/O we increment io_ticks, if we have not
+ * already done so during this tick.
+ *
+ * If I/Os take more than two ticks, we could fail to count the ticks
+ * in-between.  So we check the IO duration, and use less fine-grained
+ * ticks ("granules") if necessary.  This should usually err on the side of
+ * overcounting.
+ */
+
+void update_io_ticks(struct hd_struct *part,
+		     unsigned long now, bool end, unsigned long io_duration)
 {
-	unsigned long stamp;
+	unsigned long old_stamp;
+	unsigned long new_stamp;
+	unsigned long old_granule;
+	unsigned long new_granule;
+	unsigned int seq;
+	long flags;
+
+	if (io_duration == 0)
+		io_duration = 1;
 again:
-	stamp = READ_ONCE(part->stamp);
-	if (unlikely(stamp != now)) {
-		if (likely(cmpxchg(&part->stamp, stamp, now) == stamp)) {
-			__part_stat_add(part, io_ticks, end ? now - stamp : 1);
+
+	do {
+		seq = read_seqbegin(&part->stamp_seq);
+		old_stamp = part->stamp;
+		old_granule = part->stamp_granule;
+	} while (read_seqretry(&part->stamp_seq, seq));
+
+	new_granule = old_granule;
+	if (io_duration > new_granule)
+		/*
+		 * The IO was in the past, but the granule may extend into
+		 * the future.  Limit how far the granule can extend into the
+		 * future (five seconds), in case the IO was hanging for a
+		 * very long time.
+		 * 
+		 * XXX Oops!
+		 * 1) the urandom test causes `atopsar -d 1` to sometimes swing e.g. between 50% and 150%.
+		 * This is kind of an improvement :-), but I had been hoping it could be addressed...
+		 * 
+		 * I had thought that when userspace reads io_ticks we could 
+		 * i) if time_after(stamp, now), then subtract (stamp - now) from reported io_ticks
+		 * ii) if time_before(stamp, now) AND inflight > 0, then add (min(now - stamp, granule) to reported io_ticks.
+		 * 
+		 * XXX I still think i) works, and seems worth doing. XXX: DONE
+		 * 
+		 * The problem with ii) is it could lead to io_ticks going backwards,
+		 * which I think is pretty bad for the sample.
+		 * 
+		 * Specifically, if the granule decreases from one sample to the next,
+		 * then the amount we are adding will go down... ...and also it could be a problem if (now-stamp) is lower
+		 * 
+		 * It kind of means we want granule << sample size.
+		 * TODO so what if we limited ->granule to 100ms, but allow stamp to advance up to 5s
+		 * and maybe io_ticks by the full amount ?
+		 * 
+		 * advancing io_ticks by more will allow overcounting... arguable whether this is good or bad.
+		 * would it effectively corrupt a 10min atop sample?
+		 * but *not* advancing io_ticks by the full amount will corrupt it by undercounting?
+		 * don't we want to favour overcounting, especially if our dilemma is only caused by very high latency IOs?
+		 * 
+		 * (strawman: advance it by one hour of jiffies, to signal an error :-P)
+		 * 
+		 * would simply limiting ->granule halve the length of the problem?
+		 * 
+		 * 
+		 * <q>
+		 * This is now an approximation based on per-cpu counters.
+		 * It errs strongly on the side of over-counting IO.
+		 * When some IO's take longer than 5 seconds, average IO utilization may appear consistently above 100%.
+		 */
+		new_granule = min(io_duration, 5UL * HZ);
+
+	if (unlikely(time_before(old_stamp, now))) {
+		new_stamp = old_stamp + new_granule;
+		if (time_before(new_stamp, now))
+			new_stamp = now;
+
+		if (likely(cmpxchg(&part->stamp, old_stamp, new_stamp) == old_stamp)) {
+			__part_stat_add(part, io_ticks, max(new_granule, io_duration));
+
+			/* Decay the granule size (if this IO was shorter) */
+			if (unlikely(io_duration < old_granule)) {
+				write_seqlock_irqsave(&part->stamp_seq, flags);
+				old_granule = part->stamp_granule;
+				if (io_duration < old_granule)
+					part->stamp_granule = max(old_granule / 2,
+								  io_duration);
+				write_sequnlock_irqrestore(&part->stamp_seq, flags);
+			}
 		}
 	}
+
+	/* Update the granule size (if this IO was longer) */
+	if (unlikely(new_granule > old_granule)) {
+		write_seqlock_irqsave(&part->stamp_seq, flags);
+		old_granule = part->stamp_granule;
+		if (likely(new_granule > old_granule))
+			part->stamp_granule = new_granule;
+		write_sequnlock_irqrestore(&part->stamp_seq, flags);
+	}
+
 	if (part->partno) {
 		part = &part_to_disk(part)->part0;
 		goto again;
@@ -1755,7 +1852,7 @@ void generic_start_io_acct(struct request_queue *q, int op,
 
 	part_stat_lock();
 
-	update_io_ticks(part, jiffies, false);
+	update_io_ticks(part, jiffies, false, 0);
 	part_stat_inc(part, ios[sgrp]);
 	part_stat_add(part, sectors[sgrp], sectors);
 	part_inc_in_flight(q, part, op_is_write(op));
@@ -1773,7 +1870,7 @@ void generic_end_io_acct(struct request_queue *q, int req_op,
 
 	part_stat_lock();
 
-	update_io_ticks(part, now, true);
+	update_io_ticks(part, now, true, duration);
 	part_stat_add(part, nsecs[sgrp], jiffies_to_nsecs(duration));
 	part_dec_in_flight(q, part, op_is_write(req_op));
 

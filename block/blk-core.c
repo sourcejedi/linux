@@ -1328,13 +1328,14 @@ void blk_account_io_done(struct request *req, u64 now)
 	if (blk_do_io_stat(req) && !(req->rq_flags & RQF_FLUSH_SEQ)) {
 		const int sgrp = op_stat_group(req_op(req));
 		struct hd_struct *part;
+		u64 nsecs = now - req->start_time_ns;
 
 		part_stat_lock();
 		part = req->part;
 
-		update_io_ticks(part, jiffies, true);
+		update_io_ticks(part, jiffies, true, nsecs_to_jiffies(nsecs));
 		part_stat_inc(part, ios[sgrp]);
-		part_stat_add(part, nsecs[sgrp], now - req->start_time_ns);
+		part_stat_add(part, nsecs[sgrp], nsecs);
 		part_dec_in_flight(req->q, part, rq_data_dir(req));
 
 		hd_struct_put(part);
@@ -1373,7 +1374,7 @@ void blk_account_io_start(struct request *rq, bool new_io)
 		rq->part = part;
 	}
 
-	update_io_ticks(part, jiffies, false);
+	update_io_ticks(part, jiffies, false, 0);
 
 	part_stat_unlock();
 }

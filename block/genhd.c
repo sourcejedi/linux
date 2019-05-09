@@ -1487,6 +1487,7 @@ struct gendisk *__alloc_disk_node(int minors, int node_id)
 			kfree(disk);
 			return NULL;
 		}
+		seqlock_init(&disk->part0.stamp_seq);
 		init_rwsem(&disk->lookup_sem);
 		disk->node_id = node_id;
 		if (disk_expand_part_tbl(disk, 0)) {

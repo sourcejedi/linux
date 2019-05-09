@@ -123,6 +123,8 @@ struct hd_struct {
 	int make_it_fail;
 #endif
 	unsigned long stamp;
+	long stamp_granule;
+	seqlock_t stamp_seq;
 #ifdef	CONFIG_SMP
 	struct disk_stats __percpu *dkstats;
 #else
@@ -410,7 +412,8 @@ static inline void free_part_info(struct hd_struct *part)
 	kfree(part->info);
 }
 
-void update_io_ticks(struct hd_struct *part, unsigned long now, bool end);
+void update_io_ticks(struct hd_struct *part,
+		     unsigned long now, bool end, unsigned long io_duration);
 
 /* block/genhd.c */
 extern void device_add_disk(struct device *parent, struct gendisk *disk,

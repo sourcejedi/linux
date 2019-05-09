@@ -124,6 +124,9 @@ ssize_t part_stat_show(struct device *dev,
 	unsigned int inflight;
 
 	part_stat_read_all(p, &stat);
+	if (time_after(p->stamp, jiffies))
+		stat.io_ticks -= p->stamp - jiffies;
+
 	inflight = part_in_flight(q, p);
 
 	return sprintf(buf,
@@ -333,6 +336,7 @@ struct hd_struct *add_partition(struct gendisk *disk, int partno,
 		err = -ENOMEM;
 		goto out_free;
 	}
+	seqlock_init(&p->stamp_seq);
 
 	seqcount_init(&p->nr_sects_seq);
 	pdev = part_to_dev(p);
