@@ -336,6 +336,7 @@ struct hd_struct *add_partition(struct gendisk *disk, int partno,
 		err = -ENOMEM;
 		goto out_free;
 	}
+	//p->stamp_granule = 1; // XXX
 	seqlock_init(&p->stamp_seq);
 
 	seqcount_init(&p->nr_sects_seq);

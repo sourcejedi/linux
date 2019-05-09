@@ -1746,8 +1746,9 @@ defer:
  */
 
 void update_io_ticks(struct hd_struct *part,
-		     unsigned long now, bool end, unsigned long io_duration)
+		     unsigned long now, bool end, unsigned long start_time)
 {
+	unsigned long ticks;
 	unsigned long old_stamp;
 	unsigned long new_stamp;
 	unsigned long old_granule;
@@ -1755,10 +1756,15 @@ void update_io_ticks(struct hd_struct *part,
 	unsigned int seq;
 	long flags;
 
-	if (io_duration == 0)
-		io_duration = 1;
-again:
+	// TODO draw some more fencepost diagrams to verify
+	ticks = 1;
+	if (end)
+		ticks = now - start_time + 1;
 
+again:
+	// FIXME in the current code this isn't doing anything more than READ_ONCE did.
+	// Because the write-side critical sections are only modifying one of the variables.
+	// IOW we should switch to READ_ONCE() + use a spinlock for the write section.
 	do {
 		seq = read_seqbegin(&part->stamp_seq);
 		old_stamp = part->stamp;
@@ -1766,7 +1772,7 @@ again:
 	} while (read_seqretry(&part->stamp_seq, seq));
 
 	new_granule = old_granule;
-	if (io_duration > new_granule)
+	if (ticks > new_granule)
 		/*
 		 * The IO was in the past, but the granule may extend into
 		 * the future.  Limit how far the granule can extend into the
@@ -1808,30 +1814,41 @@ again:
 		 * It errs strongly on the side of over-counting IO.
 		 * When some IO's take longer than 5 seconds, average IO utilization may appear consistently above 100%.
 		 */
-		new_granule = min(io_duration, 5UL * HZ);
+		new_granule = min(ticks, 5UL * HZ);
 
-	if (unlikely(time_before(old_stamp, now))) {
-		new_stamp = old_stamp + new_granule;
-		if (time_before(new_stamp, now))
-			new_stamp = now;
+	if (unlikely(time_before(old_stamp, now))) { // XXX focus on this to understand fenceposts
+		if (end) {
+			new_stamp = old_stamp + new_granule;
+			if (time_before(new_stamp, now))
+				new_stamp = now;
+		} else
+			new_stamp = now + new_granule - 1;
 
+		// XXX i.e. this is where we write ->stamp.  So there's no "consistency" w.r.t. ->granule.
 		if (likely(cmpxchg(&part->stamp, old_stamp, new_stamp) == old_stamp)) {
-			__part_stat_add(part, io_ticks, max(new_granule, io_duration));
+			__part_stat_add(part, io_ticks, max(new_granule, ticks));
 
 			/* Decay the granule size (if this IO was shorter) */
-			if (unlikely(io_duration < old_granule)) {
+			if (unlikely(end && ticks < old_granule)) {
 				write_seqlock_irqsave(&part->stamp_seq, flags);
 				old_granule = part->stamp_granule;
-				if (io_duration < old_granule)
-					part->stamp_granule = max(old_granule / 2,
-								  io_duration);
+				if (ticks < old_granule)
+					part->stamp_granule = max(old_granule / 2, ticks);
 				write_sequnlock_irqrestore(&part->stamp_seq, flags);
 			}
 		}
 	}
 
-	/* Update the granule size (if this IO was longer) */
-	if (unlikely(new_granule > old_granule)) {
+	/* 
+	 * Update the granule size (if this IO was longer).
+	 * 
+	 * XXX
+	 * 
+	 * Skip granule size 2.  It doesn't really do anything, and this makes
+	 * sure that when IOs are less than 1 jiffy, we will not touch the
+	 * spinlock even if an IO spanned 2 different clock ticks.
+	 */
+	if (unlikely(new_granule > old_granule && new_granule > 2)) {
 		write_seqlock_irqsave(&part->stamp_seq, flags);
 		old_granule = part->stamp_granule;
 		if (likely(new_granule > old_granule))
@@ -1870,7 +1887,7 @@ void generic_end_io_acct(struct request_queue *q, int req_op,
 
 	part_stat_lock();
 
-	update_io_ticks(part, now, true, duration);
+	update_io_ticks(part, now, true, start_time);
 	part_stat_add(part, nsecs[sgrp], jiffies_to_nsecs(duration));
 	part_dec_in_flight(q, part, op_is_write(req_op));
 

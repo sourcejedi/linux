@@ -413,7 +413,7 @@ static inline void free_part_info(struct hd_struct *part)
 }
 
 void update_io_ticks(struct hd_struct *part,
-		     unsigned long now, bool end, unsigned long io_duration);
+		     unsigned long now, bool end, unsigned long start_time);
 
 /* block/genhd.c */
 extern void device_add_disk(struct device *parent, struct gendisk *disk,
