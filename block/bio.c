@@ -1741,10 +1741,9 @@ defer:
  *
  * If I/Os take more than two ticks, we could fail to count the ticks
  * in-between.  So we check the IO duration, and use less fine-grained
- * ticks ("granules") if necessary.  This should usually err on the side of
+ * ticks ("granules") if necessary.  This is designed to err on the side of
  * overcounting.
  */
-
 void update_io_ticks(struct hd_struct *part,
 		     unsigned long now, bool end, unsigned long start_time)
 {
@@ -1765,12 +1764,76 @@ again:
 	// FIXME in the current code this isn't doing anything more than READ_ONCE did.
 	// Because the write-side critical sections are only modifying one of the variables.
 	// IOW we should switch to READ_ONCE() + use a spinlock for the write section.
+	//
+	// uh, since the lock only protects a single variable, it seems like you could
+	// do the same with atomics (cmpxchg).
+
 	do {
 		seq = read_seqbegin(&part->stamp_seq);
 		old_stamp = part->stamp;
 		old_granule = part->stamp_granule;
 	} while (read_seqretry(&part->stamp_seq, seq));
 
+	/* FIXME comments in #if 0 block below */
+
+	new_granule = old_granule;
+	if (ticks > new_granule)
+		/*
+		 * The IO was in the past, but the granule might extend into
+		 * the future.  Limit how far the granule can extend into the
+		 * future (five seconds), in case the IO was hanging for a
+		 * very long time.
+		 *
+		 * We don't undercount the IO: we still increment io_ticks by
+		 * the full length.  If some IO's take longer than 5 seconds,
+		 * average IO utilization may appear consistently above 100%.
+		 * Overall, I think this helps more than it hurts :-).
+		 */
+		new_granule = min(ticks, 5UL * HZ);
+
+	if (unlikely(time_before(old_stamp, now))) {
+		if (end) {
+			/* We add granule - 1, because the start tick was definitely already counted */
+			new_stamp = old_stamp + new_granule - 1;
+			if (time_before(new_stamp, now))
+				new_stamp = now;
+
+			if (likely(cmpxchg(&part->stamp, old_stamp, new_stamp) == old_stamp)) {
+				__part_stat_add(part, io_ticks, ticks - 1);
+
+				/* Decay the granule size (if this IO was shorter) */
+				if (unlikely(ticks < old_granule)) {
+					write_seqlock_irqsave(&part->stamp_seq, flags);
+					old_granule = part->stamp_granule;
+					if (ticks < old_granule)
+						part->stamp_granule = max(old_granule / 2, ticks);
+					write_sequnlock_irqrestore(&part->stamp_seq, flags);
+				}
+			}
+		} else {
+			new_stamp = now - 1 + old_granule;
+
+			if (likely(cmpxchg(&part->stamp, old_stamp, new_stamp) == old_stamp))
+				__part_stat_add(part, io_ticks, old_granule);
+		}
+	}
+
+	/*
+	 * Update the granule size (if this IO was longer).
+	 *
+	 * Skip granule size 2.  It doesn't really do anything, and this makes
+	 * sure that when IOs are less than 1 jiffy, we will not touch the
+	 * spinlock even if an IO spanned 2 different clock ticks.
+	 */
+	if (end && unlikely(new_granule > old_granule && new_granule > 2)) {
+		write_seqlock_irqsave(&part->stamp_seq, flags);
+		old_granule = part->stamp_granule;
+		if (likely(new_granule > old_granule))
+			part->stamp_granule = new_granule;
+		write_sequnlock_irqrestore(&part->stamp_seq, flags);
+	}
+
+#if 0
 	new_granule = old_granule;
 	if (ticks > new_granule)
 		/*
@@ -1781,19 +1844,19 @@ again:
 		 * 
 		 * XXX Oops!
 		 * 1) the urandom test causes `atopsar -d 1` to sometimes swing e.g. between 50% and 150%.
-		 * This is kind of an improvement :-), but I had been hoping it could be addressed...
+		 * This is arguably an improvement :-), but I had been hoping it could be addressed...
 		 * 
 		 * I had thought that when userspace reads io_ticks we could 
 		 * i) if time_after(stamp, now), then subtract (stamp - now) from reported io_ticks
 		 * ii) if time_before(stamp, now) AND inflight > 0, then add (min(now - stamp, granule) to reported io_ticks.
 		 * 
-		 * XXX I still think i) works, and seems worth doing. XXX: DONE
+		 * i) seems worth doing, so I did it.
 		 * 
 		 * The problem with ii) is it could lead to io_ticks going backwards,
 		 * which I think is pretty bad for the sample.
 		 * 
 		 * Specifically, if the granule decreases from one sample to the next,
-		 * then the amount we are adding will go down... ...and also it could be a problem if (now-stamp) is lower
+		 * then the amount we are adding will go down... ...and also it could be a problem if (now - stamp) is lower
 		 * 
 		 * It kind of means we want granule << sample size.
 		 * TODO so what if we limited ->granule to 100ms, but allow stamp to advance up to 5s
@@ -1818,15 +1881,23 @@ again:
 
 	if (unlikely(time_before(old_stamp, now))) { // XXX focus on this to understand fenceposts
 		if (end) {
-			new_stamp = old_stamp + new_granule;
+			// XXX this might be adjusted
+			// currently, IOs > old_granule may be overall overcounted by 1 tick.
+			// (and I expect they are common).
+			// i think this is unecessary, i.e. we could drop the excess tick from both ticks and stamp.
+
+			new_stamp = old_stamp - 1 + new_granule;
 			if (time_before(new_stamp, now))
 				new_stamp = now;
 		} else
-			new_stamp = now + new_granule - 1;
+			new_stamp = now - 1 + old_granule;
 
 		// XXX i.e. this is where we write ->stamp.  So there's no "consistency" w.r.t. ->granule.
 		if (likely(cmpxchg(&part->stamp, old_stamp, new_stamp) == old_stamp)) {
-			__part_stat_add(part, io_ticks, max(new_granule, ticks));
+			if (end)
+				__part_stat_add(part, io_ticks, ticks);
+			else
+				__part_stat_add(part, io_ticks, old_granule);
 
 			/* Decay the granule size (if this IO was shorter) */
 			if (unlikely(end && ticks < old_granule)) {
@@ -1848,13 +1919,14 @@ again:
 	 * sure that when IOs are less than 1 jiffy, we will not touch the
 	 * spinlock even if an IO spanned 2 different clock ticks.
 	 */
-	if (unlikely(new_granule > old_granule && new_granule > 2)) {
+	if (end && unlikely(new_granule > old_granule && new_granule > 2)) {
 		write_seqlock_irqsave(&part->stamp_seq, flags);
 		old_granule = part->stamp_granule;
 		if (likely(new_granule > old_granule))
 			part->stamp_granule = new_granule;
 		write_sequnlock_irqrestore(&part->stamp_seq, flags);
 	}
+#endif
 
 	if (part->partno) {
 		part = &part_to_disk(part)->part0;
