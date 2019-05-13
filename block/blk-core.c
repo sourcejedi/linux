@@ -1333,7 +1333,7 @@ void blk_account_io_done(struct request *req, u64 now)
 		part = req->part;
 
 		update_io_ticks(part, jiffies, true,
-				nsecs_to_jiffies(req->start_time_ns));
+				nsecs_to_jiffies(now - req->start_time_ns + 999999999ULL));
 		part_stat_inc(part, ios[sgrp]);
 		part_stat_add(part, nsecs[sgrp], now - req->start_time_ns);
 		part_dec_in_flight(req->q, part, rq_data_dir(req));
@@ -1374,7 +1374,7 @@ void blk_account_io_start(struct request *rq, bool new_io)
 		rq->part = part;
 	}
 
-	update_io_ticks(part, jiffies, false, 0);
+	update_io_ticks(part, jiffies, false, 1);
 
 	part_stat_unlock();
 }

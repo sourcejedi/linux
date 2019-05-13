@@ -1745,20 +1745,14 @@ defer:
  * overcounting.
  */
 void update_io_ticks(struct hd_struct *part,
-		     unsigned long now, bool end, unsigned long start_time)
+		     unsigned long now, bool end, unsigned long ticks)
 {
-	unsigned long ticks;
 	unsigned long old_stamp;
 	unsigned long new_stamp;
 	unsigned long old_granule;
 	unsigned long new_granule;
 	unsigned int seq;
 	long flags;
-
-	// TODO draw some more fencepost diagrams to verify
-	ticks = 1;
-	if (end)
-		ticks = now - start_time + 1;
 
 again:
 	// FIXME in the current code this isn't doing anything more than READ_ONCE did.
@@ -1941,7 +1935,7 @@ void generic_start_io_acct(struct request_queue *q, int op,
 
 	part_stat_lock();
 
-	update_io_ticks(part, jiffies, false, 0);
+	update_io_ticks(part, jiffies, false, 1);
 	part_stat_inc(part, ios[sgrp]);
 	part_stat_add(part, sectors[sgrp], sectors);
 	part_inc_in_flight(q, part, op_is_write(op));
@@ -1959,7 +1953,7 @@ void generic_end_io_acct(struct request_queue *q, int req_op,
 
 	part_stat_lock();
 
-	update_io_ticks(part, now, true, start_time);
+	update_io_ticks(part, now, true, duration + 1);
 	part_stat_add(part, nsecs[sgrp], jiffies_to_nsecs(duration));
 	part_dec_in_flight(q, part, op_is_write(req_op));
 
